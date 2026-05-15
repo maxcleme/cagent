@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/lifecycle"
@@ -146,12 +147,14 @@ func sectionHeader(label string) string {
 // formatToolsetStatus renders one toolset as a small block:
 //
 //	NAME         [state]   KIND
-//	  last_error: ...                    (only when set)
+//	  last_error: ...                    (only when set, wrapped to width)
 //	  restarts: N                        (only when > 0)
 //
 // nameColWidth is the (rune-width) padding to apply to the name column
-// so adjacent rows align their state badge and Kind label.
-func formatToolsetStatus(s *tools.ToolsetStatus, nameColWidth, _ int) []string {
+// so adjacent rows align their state badge and Kind label. contentWidth
+// is the inner width of the dialog; long error messages are wrapped to
+// fit (the dialog is scrollable, so the full text is reachable).
+func formatToolsetStatus(s *tools.ToolsetStatus, nameColWidth, contentWidth int) []string {
 	name := styles.BoldStyle.Render(s.Name)
 	if pad := nameColWidth - lipgloss.Width(s.Name); pad > 0 {
 		name += strings.Repeat(" ", pad)
@@ -163,18 +166,53 @@ func formatToolsetStatus(s *tools.ToolsetStatus, nameColWidth, _ int) []string {
 	out := []string{headline}
 
 	if s.LastError != nil {
-		// Truncate very long error messages so they don't blow out the
-		// dialog width. The dialog is scroll-capable, so a one-line
-		// summary is enough. Use rune-aware truncation so we never
-		// split a multi-byte UTF-8 sequence.
-		msg := truncateRunes(s.LastError.Error(), 240)
-		out = append(out, "    "+styles.ErrorStyle.Render("last_error: "+strings.ReplaceAll(msg, "\n", " ")))
+		out = append(out, formatLastErrorLines(s.LastError.Error(), contentWidth)...)
 	}
 
 	if s.RestartCount > 0 {
 		out = append(out, "    "+styles.MutedStyle.Render(fmt.Sprintf("restarts: %d", s.RestartCount)))
 	}
 
+	return out
+}
+
+// formatLastErrorLines renders a "last_error:" block, wrapping the
+// message to fit contentWidth so users can read the entire error.
+// Continuation lines are indented to align under the message text:
+//
+//	    last_error: first wrapped portion of the message
+//	                continuation aligned under the first chunk
+//
+// Newlines in the original error are preserved (each line is wrapped
+// independently), so multi-line errors like stack traces stay legible.
+func formatLastErrorLines(msg string, contentWidth int) []string {
+	const indent = "    "
+	const label = "last_error: "
+	prefixWidth := lipgloss.Width(indent) + lipgloss.Width(label)
+	avail := contentWidth - prefixWidth
+	if avail < 1 {
+		avail = 1
+	}
+
+	var chunks []string
+	for _, line := range strings.Split(msg, "\n") {
+		if line == "" {
+			chunks = append(chunks, "")
+			continue
+		}
+		wrapped := ansi.Wrap(line, avail, " /-_,;:")
+		chunks = append(chunks, strings.Split(wrapped, "\n")...)
+	}
+
+	cont := indent + strings.Repeat(" ", lipgloss.Width(label))
+	out := make([]string, 0, len(chunks))
+	for i, c := range chunks {
+		prefix := cont
+		if i == 0 {
+			prefix = indent + label
+		}
+		out = append(out, styles.ErrorStyle.Render(prefix+c))
+	}
 	return out
 }
 
@@ -187,20 +225,6 @@ func toolsetKindLabel(kind string) string {
 		return "Built-in"
 	}
 	return kind
-}
-
-// truncateRunes returns s shortened to at most maxRunes Unicode code
-// points, with a single "…" appended if truncation occurred. It is safe
-// for arbitrary UTF-8 input.
-func truncateRunes(s string, maxRunes int) string {
-	if maxRunes <= 0 {
-		return ""
-	}
-	runes := []rune(s)
-	if len(runes) <= maxRunes {
-		return s
-	}
-	return string(runes[:maxRunes]) + "…"
 }
 
 // formatStateBadge returns a short bracketed label for the lifecycle state,
